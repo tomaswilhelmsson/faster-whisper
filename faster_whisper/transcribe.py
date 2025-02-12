@@ -375,7 +375,7 @@ class BatchedInferencePipeline:
             - an instance of TranscriptionInfo
         """
 
-        if self.dynamic_load:
+        if self.dynamic_load and  not self.model.model_is_loaded:
             self.model.load_model()
         
         try:
@@ -546,7 +546,7 @@ class BatchedInferencePipeline:
                 log_progress,
             )
         finally:
-            if self.dynamic_load:
+            if self.dynamic_load and self.model.model_is_loaded:
                 self.model.unload_model()
             return segments, info
 
@@ -687,8 +687,8 @@ class WhisperModel:
         self.max_length = 448
         self.dynamic_load = dynamic_load
         
-        if self.dynamic_load:
-            self.model.unload_model(True)
+        if self.dynamic_load and self.model.model_is_loaded:
+                self.model.unload_model(True)
         
 
     @property
