@@ -375,174 +375,180 @@ class BatchedInferencePipeline:
             - an instance of TranscriptionInfo
         """
 
-        sampling_rate = self.model.feature_extractor.sampling_rate
+        if self.dynamic_load:
+            self.model.load_model()
+        
+        try:
+            sampling_rate = self.model.feature_extractor.sampling_rate
 
-        if multilingual and not self.model.model.is_multilingual:
-            self.model.logger.warning(
-                "The current model is English-only but the multilingual parameter is set to"
-                "True; setting to False instead."
-            )
-            multilingual = False
-
-        if not isinstance(audio, np.ndarray):
-            audio = decode_audio(audio, sampling_rate=sampling_rate)
-        duration = audio.shape[0] / sampling_rate
-
-        self.model.logger.info(
-            "Processing audio with duration %s", format_timestamp(duration)
-        )
-
-        chunk_length = chunk_length or self.model.feature_extractor.chunk_length
-        # if no segment split is provided, use vad_model and generate segments
-        if not clip_timestamps:
-            if vad_filter:
-                if vad_parameters is None:
-                    vad_parameters = VadOptions(
-                        max_speech_duration_s=chunk_length,
-                        min_silence_duration_ms=160,
-                    )
-                elif isinstance(vad_parameters, dict):
-                    if "max_speech_duration_s" in vad_parameters.keys():
-                        vad_parameters.pop("max_speech_duration_s")
-
-                    vad_parameters = VadOptions(
-                        **vad_parameters, max_speech_duration_s=chunk_length
-                    )
-
-                active_segments = get_speech_timestamps(audio, vad_parameters)
-                clip_timestamps = merge_segments(active_segments, vad_parameters)
-            # run the audio if it is less than 30 sec even without clip_timestamps
-            elif duration < chunk_length:
-                clip_timestamps = [{"start": 0, "end": audio.shape[0]}]
-            else:
-                raise RuntimeError(
-                    "No clip timestamps found. "
-                    "Set 'vad_filter' to True or provide 'clip_timestamps'."
-                )
-
-        duration_after_vad = (
-            sum((segment["end"] - segment["start"]) for segment in clip_timestamps)
-            / sampling_rate
-        )
-
-        self.model.logger.info(
-            "VAD filter removed %s of audio",
-            format_timestamp(duration - duration_after_vad),
-        )
-
-        audio_chunks, chunks_metadata = collect_chunks(audio, clip_timestamps)
-        features = (
-            [self.model.feature_extractor(chunk)[..., :-1] for chunk in audio_chunks]
-            if duration_after_vad
-            else []
-        )
-
-        all_language_probs = None
-        # detecting the language if not provided
-        if language is None:
-            if not self.model.model.is_multilingual:
-                language = "en"
-                language_probability = 1
-            else:
-                (
-                    language,
-                    language_probability,
-                    all_language_probs,
-                ) = self.model.detect_language(
-                    features=np.concatenate(
-                        features
-                        + [
-                            np.full((self.model.model.n_mels, 1), -1.5, dtype="float32")
-                        ],
-                        axis=1,
-                    ),  # add a dummy feature to account for empty audio
-                    language_detection_segments=language_detection_segments,
-                    language_detection_threshold=language_detection_threshold,
-                )
-
-                self.model.logger.info(
-                    "Detected language '%s' with probability %.2f",
-                    language,
-                    language_probability,
-                )
-        else:
-            if not self.model.model.is_multilingual and language != "en":
+            if multilingual and not self.model.model.is_multilingual:
                 self.model.logger.warning(
-                    "The current model is English-only but the language parameter is set to '%s'; "
-                    "using 'en' instead." % language
+                    "The current model is English-only but the multilingual parameter is set to"
+                    "True; setting to False instead."
                 )
-                language = "en"
+                multilingual = False
 
-            language_probability = 1
+            if not isinstance(audio, np.ndarray):
+                audio = decode_audio(audio, sampling_rate=sampling_rate)
+            duration = audio.shape[0] / sampling_rate
 
-        tokenizer = Tokenizer(
-            self.model.hf_tokenizer,
-            self.model.model.is_multilingual,
-            task=task,
-            language=language,
-        )
+            self.model.logger.info(
+                "Processing audio with duration %s", format_timestamp(duration)
+            )
 
-        features = (
-            np.stack([pad_or_trim(feature) for feature in features]) if features else []
-        )
+            chunk_length = chunk_length or self.model.feature_extractor.chunk_length
+            # if no segment split is provided, use vad_model and generate segments
+            if not clip_timestamps:
+                if vad_filter:
+                    if vad_parameters is None:
+                        vad_parameters = VadOptions(
+                            max_speech_duration_s=chunk_length,
+                            min_silence_duration_ms=160,
+                        )
+                    elif isinstance(vad_parameters, dict):
+                        if "max_speech_duration_s" in vad_parameters.keys():
+                            vad_parameters.pop("max_speech_duration_s")
 
-        options = TranscriptionOptions(
-            beam_size=beam_size,
-            best_of=best_of,
-            patience=patience,
-            length_penalty=length_penalty,
-            repetition_penalty=repetition_penalty,
-            no_repeat_ngram_size=no_repeat_ngram_size,
-            log_prob_threshold=log_prob_threshold,
-            no_speech_threshold=no_speech_threshold,
-            compression_ratio_threshold=compression_ratio_threshold,
-            temperatures=(
-                temperature[:1]
-                if isinstance(temperature, (list, tuple))
-                else [temperature]
-            ),
-            initial_prompt=initial_prompt,
-            prefix=prefix,
-            suppress_blank=suppress_blank,
-            suppress_tokens=(
-                get_suppressed_tokens(tokenizer, suppress_tokens)
-                if suppress_tokens
-                else suppress_tokens
-            ),
-            prepend_punctuations=prepend_punctuations,
-            append_punctuations=append_punctuations,
-            max_new_tokens=max_new_tokens,
-            hotwords=hotwords,
-            word_timestamps=word_timestamps,
-            hallucination_silence_threshold=None,
-            condition_on_previous_text=False,
-            clip_timestamps=clip_timestamps,
-            prompt_reset_on_temperature=0.5,
-            multilingual=multilingual,
-            without_timestamps=without_timestamps,
-            max_initial_timestamp=0.0,
-        )
+                        vad_parameters = VadOptions(
+                            **vad_parameters, max_speech_duration_s=chunk_length
+                        )
 
-        info = TranscriptionInfo(
-            language=language,
-            language_probability=language_probability,
-            duration=duration,
-            duration_after_vad=duration_after_vad,
-            transcription_options=options,
-            vad_options=vad_parameters,
-            all_language_probs=all_language_probs,
-        )
+                    active_segments = get_speech_timestamps(audio, vad_parameters)
+                    clip_timestamps = merge_segments(active_segments, vad_parameters)
+                # run the audio if it is less than 30 sec even without clip_timestamps
+                elif duration < chunk_length:
+                    clip_timestamps = [{"start": 0, "end": audio.shape[0]}]
+                else:
+                    raise RuntimeError(
+                        "No clip timestamps found. "
+                        "Set 'vad_filter' to True or provide 'clip_timestamps'."
+                    )
 
-        segments = self._batched_segments_generator(
-            features,
-            tokenizer,
-            chunks_metadata,
-            batch_size,
-            options,
-            log_progress,
-        )
+            duration_after_vad = (
+                sum((segment["end"] - segment["start"]) for segment in clip_timestamps)
+                / sampling_rate
+            )
 
-        return segments, info
+            self.model.logger.info(
+                "VAD filter removed %s of audio",
+                format_timestamp(duration - duration_after_vad),
+            )
+
+            audio_chunks, chunks_metadata = collect_chunks(audio, clip_timestamps)
+            features = (
+                [self.model.feature_extractor(chunk)[..., :-1] for chunk in audio_chunks]
+                if duration_after_vad
+                else []
+            )
+
+            all_language_probs = None
+            # detecting the language if not provided
+            if language is None:
+                if not self.model.model.is_multilingual:
+                    language = "en"
+                    language_probability = 1
+                else:
+                    (
+                        language,
+                        language_probability,
+                        all_language_probs,
+                    ) = self.model.detect_language(
+                        features=np.concatenate(
+                            features
+                            + [
+                                np.full((self.model.model.n_mels, 1), -1.5, dtype="float32")
+                            ],
+                            axis=1,
+                        ),  # add a dummy feature to account for empty audio
+                        language_detection_segments=language_detection_segments,
+                        language_detection_threshold=language_detection_threshold,
+                    )
+
+                    self.model.logger.info(
+                        "Detected language '%s' with probability %.2f",
+                        language,
+                        language_probability,
+                    )
+            else:
+                if not self.model.model.is_multilingual and language != "en":
+                    self.model.logger.warning(
+                        "The current model is English-only but the language parameter is set to '%s'; "
+                        "using 'en' instead." % language
+                    )
+                    language = "en"
+
+                language_probability = 1
+
+            tokenizer = Tokenizer(
+                self.model.hf_tokenizer,
+                self.model.model.is_multilingual,
+                task=task,
+                language=language,
+            )
+
+            features = (
+                np.stack([pad_or_trim(feature) for feature in features]) if features else []
+            )
+
+            options = TranscriptionOptions(
+                beam_size=beam_size,
+                best_of=best_of,
+                patience=patience,
+                length_penalty=length_penalty,
+                repetition_penalty=repetition_penalty,
+                no_repeat_ngram_size=no_repeat_ngram_size,
+                log_prob_threshold=log_prob_threshold,
+                no_speech_threshold=no_speech_threshold,
+                compression_ratio_threshold=compression_ratio_threshold,
+                temperatures=(
+                    temperature[:1]
+                    if isinstance(temperature, (list, tuple))
+                    else [temperature]
+                ),
+                initial_prompt=initial_prompt,
+                prefix=prefix,
+                suppress_blank=suppress_blank,
+                suppress_tokens=(
+                    get_suppressed_tokens(tokenizer, suppress_tokens)
+                    if suppress_tokens
+                    else suppress_tokens
+                ),
+                prepend_punctuations=prepend_punctuations,
+                append_punctuations=append_punctuations,
+                max_new_tokens=max_new_tokens,
+                hotwords=hotwords,
+                word_timestamps=word_timestamps,
+                hallucination_silence_threshold=None,
+                condition_on_previous_text=False,
+                clip_timestamps=clip_timestamps,
+                prompt_reset_on_temperature=0.5,
+                multilingual=multilingual,
+                without_timestamps=without_timestamps,
+                max_initial_timestamp=0.0,
+            )
+
+            info = TranscriptionInfo(
+                language=language,
+                language_probability=language_probability,
+                duration=duration,
+                duration_after_vad=duration_after_vad,
+                transcription_options=options,
+                vad_options=vad_parameters,
+                all_language_probs=all_language_probs,
+            )
+
+            segments = self._batched_segments_generator(
+                features,
+                tokenizer,
+                chunks_metadata,
+                batch_size,
+                options,
+                log_progress,
+            )
+        finally:
+            if self.dynamic_load:
+                self.model.unload_model()
+            return segments, info
 
     def _batched_segments_generator(
         self, features, tokenizer, chunks_metadata, batch_size, options, log_progress
@@ -596,6 +602,7 @@ class WhisperModel:
         download_root: Optional[str] = None,
         local_files_only: bool = False,
         files: dict = None,
+        dynamic_load: bool = False,
         **model_kwargs,
     ):
         """Initializes the Whisper model.
@@ -678,6 +685,11 @@ class WhisperModel:
         )
         self.time_precision = 0.02
         self.max_length = 448
+        self.dynamic_load = dynamic_load
+        
+        if self.dynamic_load:
+            self.model.unload_model(True)
+        
 
     @property
     def supported_languages(self) -> List[str]:
